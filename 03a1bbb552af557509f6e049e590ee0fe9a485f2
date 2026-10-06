@@ -1,0 +1,17 @@
+PR #15 provenance (squashed into this commit)
+- URL: https://github.com/UniFlowMatch/UFM/pull/15
+- Title: Make `uniflowmatch` installable without edit mode (-e)
+- Author: Alex Stoken <astoken@email.arizona.edu>
+- Original commits: 8198316cb5441ae28ca2cedd27f6e59b56cc1448, 5dd028914b42fd62cb3cfe9dea0570431afa244c
+- Scope: setup.py (find_packages), uniflowmatch/models/base.py, uniflowmatch/models/ufm.py (relative imports)
+
+Verification on this machine (RTX 2070, CUDA 13, Python 3.11)
+- `uv sync` + `uv run ufm test` pass
+- `uv run pytest -m e2e`: 4 passed
+  - real UFM-Base checkpoint load (0.428B params)
+  - full inference: ~1.5 s/pair, peak GPU ~3.3 GB, covisible fraction 0.766, photometric MAE 38.8
+  - `ufm infer` CLI produces flow/covisibility/warped outputs
+  - ONNX Runtime CUDAExecutionProvider parity vs PyTorch
+- ONNX export (core 420x560, opset 18, dynamo exporter)
+  - flow mean/max abs diff 1.5e-4 / 6.9e-3 px
+  - covisibility max abs diff 8e-5
