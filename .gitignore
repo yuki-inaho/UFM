@@ -152,3 +152,7 @@ skyseg.onnx
 # pixi environments
 .pixi
 *.egg-info
+
+# ONNX exports
+exports/
+*.onnx.data

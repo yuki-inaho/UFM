@@ -78,6 +78,17 @@ pip install -e .
 pre-commit install  # Install pre-commit hooks
 ```
 
+#### With uv (recommended)
+
+The repository provides a `uv.lock` and treats [UniCeption](https://github.com/castacks/UniCeption) as a workspace member, so a single `uv sync` installs everything (Python 3.11):
+
+```bash
+git clone --recursive https://github.com/UniFlowMatch/UFM.git
+cd UFM
+uv sync
+uv run ufm test
+```
+
 ### Verify Installation
 
 Verify your installation by running the basic model test:
@@ -91,6 +102,15 @@ python uniflowmatch/models/ufm.py
 ```
 
 Verify that `ufm_output.png` looks like `examples/example_ufm_output.png`.
+
+### End-to-End Tests
+
+The E2E tests download the real checkpoints from Hugging Face and run the full pipeline (model load, pre/postprocessing, flow & covisibility outputs and the `ufm infer` CLI) on the bundled example image pairs:
+
+```bash
+uv sync
+uv run pytest -m e2e -v -s
+```
 
 ### Command Line Interface
 
@@ -154,6 +174,20 @@ with torch.no_grad():
     flow = result.flow.flow_output[0].cpu().numpy()
     covisibility = result.covisibility.mask[0].cpu().numpy()
 ```
+
+## ONNX Export
+
+Export the fixed-resolution core network (420x560 for the 560-resolution checkpoints) and verify it against PyTorch with ONNX Runtime:
+
+```bash
+# Install ONNX dependencies (uv: included in the dev dependency group)
+uv sync
+
+# Export and verify (CUDA execution provider is used automatically when available)
+uv run python scripts/export_onnx.py --model infinity1096/UFM-Base --output exports/ufm_base_420x560.onnx --verify
+```
+
+The exported graph takes two normalized `(1, 3, 420, 560)` image tensors and returns `flow` and `covisibility` in the scaled model space. `uniflowmatch.utils.onnx.UFMOnnxRunner` runs the exported model end-to-end (resize/normalize + mapping predictions back to the original image space). The corresponding E2E test is included in `tests/test_onnx_e2e.py`.
 
 ## Interactive Demo
 

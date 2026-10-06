@@ -34,7 +34,8 @@ dependencies = [
     "huggingface_hub",
     "einops",
     "gradio",
-    # UniCeption dependencies
+    # UniCeption dependency
+    "uniception",
     "timm",
     "jaxtyping",
     "Pillow",
@@ -51,12 +52,20 @@ dev = [
 demo = [
     "gradio",
 ]
+onnx = [
+    "onnx",
+    "onnxscript",
+    "onnxruntime-gpu",
+]
 all = [
     "black",
     "isort",
     "pre-commit",
     "pytest",
     "gradio",
+    "onnx",
+    "onnxscript",
+    "onnxruntime-gpu",
 ]
 
 [project.scripts]
@@ -68,6 +77,29 @@ Homepage = "https://uniflowmatch.github.io/"
 Repository = "https://github.com/UniFlowMatch/UFM.git"
 Documentation = "https://uniflowmatch.github.io/"
 "Bug Tracker" = "https://github.com/UniFlowMatch/UFM/issues"
+
+[dependency-groups]
+dev = [
+    "black",
+    "isort",
+    "pre-commit",
+    "pytest",
+    "onnx",
+    "onnxscript",
+    "onnxruntime-gpu",
+]
+
+[tool.uv.workspace]
+members = ["UniCeption"]
+
+[tool.uv.sources]
+uniception = { workspace = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "e2e: end-to-end tests that download model checkpoints and run inference",
+]
 
 [tool.black]
 line-length = 120
