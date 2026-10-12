@@ -40,6 +40,8 @@ We have completed cleaning the data processing, all data should be ready. Please
 - **Example and complete training code** for recreating UFM training.
 - **Logging and visualization support** to monitor training.
 
+> **RGB-D fine-tuning and evaluation:** see [`docs/rgbd_training.md`](docs/rgbd_training.md).
+
 ## Getting Started
 ### Setup Environment
 

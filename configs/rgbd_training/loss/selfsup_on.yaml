@@ -1,0 +1,6 @@
+defaults:
+  - selfsup_off
+name: selfsup_on
+selfsup:
+  enabled: true
+  weight: 0.1            # ON weight candidate

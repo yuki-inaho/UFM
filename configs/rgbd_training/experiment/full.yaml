@@ -1,0 +1,23 @@
+# Experiment preset: full -- 12 epochs over the entire eligible train
+# population, full validation each epoch, early stop OFF, no max_updates cap.
+#
+# The FULL budget is finally fixed from the capacity measurement before the
+# FULL run starts; a shortened run must never be reported as FULL.
+name: full
+max_updates: null          # FULL must NOT use a max_updates cap
+epochs: 12
+validate_every_epochs: 1
+validate_full_each_epoch: true
+save_every_epochs: 1
+validation_max_pairs: null  # full validation: no pair cap
+early_stop: false
+full_budget_fixed: false   # set true only after the capacity measurement
+eligible_train_population: entire_eligible_train_population
+
+comparison:
+  selfsup_matched: true
+  fixed_seed: 20261012
+  fixed_optimizer: true
+  fixed_budget: true
+  fixed_split: true
+  run_by_step: 21

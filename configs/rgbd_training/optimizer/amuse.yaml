@@ -1,0 +1,62 @@
+# Optimizer group: AMUSE (default) -- pinned official source, Apache-2.0.
+#
+# Constructor args below are cross-checked read-only against
+# references/amuse/src/optim/AMUSE.py (AMUSE.__init__).  Implementation of the
+# wrapper/parameter grouping is 17B's job; this file only carries the schema.
+name: amuse
+default: true
+source:
+  commit: 48922743b32f33f919ab54edde3dbad0d0ce2dc7
+  license: Apache-2.0
+# AMUSE is schedule-free: no external LR scheduler may be attached.
+schedule_free: true
+external_scheduler: null
+
+# initial fine-tune LR candidate (pre-capacity; finalized by 18/19 before FULL).
+# AMUSE default Muon LR; README notes sgd_lr == lr works well.
+lr: 2.0e-2
+sgd_lr: 2.0e-2
+weight_decay: 0.05
+
+# AMUSE.__init__ keyword args (names must match the constructor exactly).
+constructor_args:
+  beta1: 0.9
+  weight_lr_power: 2.0
+  warmup_steps: 100        # must be > 0
+  rho: 1.0
+  r: 0.0
+  weight_decay_at_y: 0.0
+
+# Muon hidden-matrix group (use_muon=True); excludes embedding/output.
+groups:
+  muon:
+    use_muon: true
+    lr: ${optimizer.lr}
+    momentum: 0.95
+    aux_update_type: sgd
+    weight_decay: ${optimizer.weight_decay}
+  aux:
+    use_muon: false
+    update_type: sgd
+    lr: ${optimizer.sgd_lr}
+    weight_decay: 0.0
+
+# train/eval semantics for 17B: eval returns averaged x; save training y+z.
+train_eval:
+  eval_returns_averaged_x: true
+  save_training_y: true
+  save_training_z: true
+  # AMUSE instance attrs to persist alongside the optimizer state_dict;
+  # group-state scalars (k / weight_sum / beta1) ride in the standard state_dict.
+  save_extra_attrs:
+    - train_mode
+    - weight_decay_at_y
+    - beta1_init
+    - weight_lr_power
+    - warmup_steps
+    - rho
+    - r
+
+gradient_clip:
+  algorithm: norm
+  value: 1.0

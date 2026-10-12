@@ -1,0 +1,21 @@
+# Experiment preset: smoke -- 1 update + validation/save cadence every update.
+name: smoke
+max_updates: 1
+epochs: null
+validate_every_updates: 1
+save_every_updates: 1
+# cap the validation population for a fast smoke gate (public null => external).
+validation_max_pairs: 2
+early_stop: false
+# the FULL budget is fixed from the capacity measurement before training starts.
+full_budget_fixed: false
+eligible_train_population: null
+
+# matched selfsup OFF/ON comparison (same init/seed/optimizer/budget/split).
+comparison:
+  selfsup_matched: true
+  fixed_seed: 20261012
+  fixed_optimizer: true
+  fixed_budget: true
+  fixed_split: true
+  run_by_step: 21

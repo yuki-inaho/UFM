@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Pre-stage privacy guard for the public UFM repository.
 
-A private dataset (Banka26) and its derived artifacts (checkpoints, media,
-credentials, host-local paths) must never be staged into this public repo.
+A private paired-capture dataset and its derived artifacts (checkpoints,
+media, credentials, host-local paths) must never be staged into this public
+repo.
 This stdlib-only CLI inspects *candidate* paths and rejects anything that
 looks private.
 

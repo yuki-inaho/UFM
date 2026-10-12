@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union
 
 import torch
+import torch.nn.functional as F
+
+from uniflowmatch.models.depth_fusion import DepthFusionShapeError, prepare_metric_depth
 
 
 @dataclass
@@ -141,6 +144,12 @@ class UniFlowMatchModelsBase(torch.nn.Module):
         source_image: torch.Tensor,
         target_image: torch.Tensor,
         data_norm_type: Optional[str] = None,
+        source_depth: Optional[torch.Tensor] = None,
+        target_depth: Optional[torch.Tensor] = None,
+        depth_mask=None,
+        camera_intrinsics=None,
+        source_depth_mask: Optional[torch.Tensor] = None,
+        target_depth_mask: Optional[torch.Tensor] = None,
     ) -> UFMOutputInterface:
         """
         Predict correspondences between source and target images.
@@ -150,6 +159,18 @@ class UniFlowMatchModelsBase(torch.nn.Module):
         Args:
             source_image (torch.Tensor): Tensor of shape BCHW/BHWC/CHW/HWC, dtype of uint8 or float32 The source image tensor.
             target_image (torch.Tensor): Tensor of shape BCHW/BHWC/CHW/HWC, dtype of uint8 or float32 The target image tensor.
+            data_norm_type (Optional[str]): normalization of float inputs (see IMAGE_NORMALIZATION_DICT).
+            source_depth (Optional[torch.Tensor]): metric depth (metres) for the source view,
+                shape HW / 1HW / BHW. ``None`` keeps the RGB-only path.
+            target_depth (Optional[torch.Tensor]): metric depth (metres) for the target view.
+            depth_mask: optional explicit **(source, target)** pair of bool valid masks
+                (HW / 1HW / BHW).  A single tensor is rejected: never implicitly reuse
+                one mask for both views.  Defaults per view to ``depth > 0``.
+            camera_intrinsics: optional explicit **(source, target)** pair of (3, 3)
+                intrinsics; may contain NaN when K is unknown.  The depth stem does
+                not unproject, so K is carried for the loader/trainer only.
+            source_depth_mask / target_depth_mask (Optional[torch.Tensor]): per-view
+                explicit masks that override ``depth_mask``.
 
         Returns:
             UFMOutputInterface:
@@ -233,12 +254,99 @@ class UniFlowMatchModelsBase(torch.nn.Module):
             raise ValueError("source_image and target_image must be of type torch.float32 or torch.uint8")
 
         # Now all the inputs are normalized according to the model's encoder and organized in BCHW format
-        return self._predict_correspondences_batched(source_image, target_image)
+
+        # ----- optional metric depth (RGB-D), explicit source/target pairs ----- #
+        # depth is coerced first; explicit per-view masks and the (source, target)
+        # ``depth_mask`` pair then override the ``depth > 0`` default (never the
+        # other way round, and one tensor is never reused for both views).
+        src_d = self._coerce_predict_depth(source_depth, "source_depth")
+        tgt_d = self._coerce_predict_depth(target_depth, "target_depth")
+        src_m = source_depth_mask
+        tgt_m = target_depth_mask
+        if depth_mask is not None:
+            m_src, m_tgt = self._as_pair(depth_mask, "depth_mask")
+            if src_m is None:
+                src_m = m_src
+            if tgt_m is None:
+                tgt_m = m_tgt
+        src_m = self._resolve_predict_mask(src_d, src_m, "source_depth")
+        tgt_m = self._resolve_predict_mask(tgt_d, tgt_m, "target_depth")
+        src_K, tgt_K = self._as_pair(camera_intrinsics, "camera_intrinsics")
+
+        return self._predict_correspondences_batched(
+            source_image,
+            target_image,
+            source_depth=src_d,
+            target_depth=tgt_d,
+            source_depth_mask=src_m,
+            target_depth_mask=tgt_m,
+            source_camera_intrinsics=src_K,
+            target_camera_intrinsics=tgt_K,
+        )
+
+    # ------------------------------------------------------------------ #
+    # RGB-D predict helpers
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _as_pair(value, name):
+        """Split an explicit ``(source, target)`` pair; reject a single tensor."""
+        if value is None:
+            return None, None
+        if isinstance(value, torch.Tensor):
+            raise ValueError(
+                f"{name} must be an explicit (source, target) pair, not a single tensor; "
+                f"never reuse one tensor for both views"
+            )
+        try:
+            src, tgt = value
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be a (source, target) pair, got {type(value).__name__}") from exc
+        return src, tgt
+
+    @staticmethod
+    def _coerce_predict_depth(depth, name):
+        """Coerce an optional metric depth to ``(B, 1, H, W)`` float metres."""
+        if depth is None:
+            return None
+        d, _ = prepare_metric_depth(depth)
+        return d
+
+    @staticmethod
+    def _resolve_predict_mask(depth, mask, name):
+        """Resolve the per-view mask: explicit mask wins, else ``depth > 0``."""
+        if depth is None:
+            if mask is not None:
+                raise ValueError(f"{name}_mask was given without {name}")
+            return None
+        if mask is None:
+            return depth > 0
+        _, m = prepare_metric_depth(depth, mask)
+        return m
+
+    @staticmethod
+    def _resize_intrinsics_halfpixel(K, src_hw, dst_hw):
+        """K' = A K for an align_corners=False (half-pixel) resize; NaN K stays NaN."""
+        K = K.to(torch.float32)
+        src_h, src_w = int(src_hw[0]), int(src_hw[1])
+        dst_h, dst_w = int(dst_hw[0]), int(dst_hw[1])
+        sx, sy = dst_w / src_w, dst_h / src_h
+        A = torch.tensor(
+            [[sx, 0.0, 0.5 * (sx - 1.0)], [0.0, sy, 0.5 * (sy - 1.0)], [0.0, 0.0, 1.0]],
+            device=K.device,
+            dtype=K.dtype,
+        )
+        return A @ K
 
     def _predict_correspondences_batched(
         self,
         source_image: torch.Tensor,
         target_image: torch.Tensor,
+        source_depth: Optional[torch.Tensor] = None,
+        target_depth: Optional[torch.Tensor] = None,
+        source_depth_mask: Optional[torch.Tensor] = None,
+        target_depth_mask: Optional[torch.Tensor] = None,
+        source_camera_intrinsics: Optional[torch.Tensor] = None,
+        target_camera_intrinsics: Optional[torch.Tensor] = None,
     ) -> UFMOutputInterface:
         assert isinstance(source_image, torch.Tensor), "source_image must be a torch.Tensor"
         assert isinstance(target_image, torch.Tensor), "target_image must be a torch.Tensor"
@@ -270,6 +378,43 @@ class UniFlowMatchModelsBase(torch.nn.Module):
         # Run a forward pass
         view1 = {"img": scaled_img0, "symmetrized": False, "data_norm_type": self.encoder.data_norm_type}
         view2 = {"img": scaled_img1, "symmetrized": False, "data_norm_type": self.encoder.data_norm_type}
+
+        # depth/mask are resized nearest alongside the native->model resize; K is
+        # carried as K'=AK (half-pixel) for the loader/trainer (the depth stem does
+        # not unproject, so K is informational here).
+        scaled_hw0 = scaled_img0.shape[2:]
+        scaled_hw1 = scaled_img1.shape[2:]
+        if source_depth is not None and tuple(source_depth.shape[-2:]) != tuple(source_image.shape[2:]):
+            raise DepthFusionShapeError(
+                f"source_depth spatial {tuple(source_depth.shape[-2:])} != source image "
+                f"{tuple(source_image.shape[2:])}: metric depth must match the native "
+                f"image resolution before the model resize"
+            )
+        if target_depth is not None and tuple(target_depth.shape[-2:]) != tuple(target_image.shape[2:]):
+            raise DepthFusionShapeError(
+                f"target_depth spatial {tuple(target_depth.shape[-2:])} != target image "
+                f"{tuple(target_image.shape[2:])}"
+            )
+        if source_depth is not None:
+            view1["depth"] = F.interpolate(source_depth, size=scaled_hw0, mode="nearest")
+            if source_depth_mask is not None:
+                view1["depth_mask"] = (
+                    F.interpolate(source_depth_mask.to(torch.float32), size=scaled_hw0, mode="nearest") > 0.5
+                )
+        if target_depth is not None:
+            view2["depth"] = F.interpolate(target_depth, size=scaled_hw1, mode="nearest")
+            if target_depth_mask is not None:
+                view2["depth_mask"] = (
+                    F.interpolate(target_depth_mask.to(torch.float32), size=scaled_hw1, mode="nearest") > 0.5
+                )
+        if source_camera_intrinsics is not None:
+            view1["camera_intrinsics"] = self._resize_intrinsics_halfpixel(
+                source_camera_intrinsics, source_image.shape[2:], scaled_hw0
+            )
+        if target_camera_intrinsics is not None:
+            view2["camera_intrinsics"] = self._resize_intrinsics_halfpixel(
+                target_camera_intrinsics, target_image.shape[2:], scaled_hw1
+            )
 
         with torch.no_grad():
             with torch.autocast("cuda", torch.float16):

@@ -33,6 +33,7 @@ from uniflowmatch.models.base import (
 )
 from uniflowmatch.models.unet_encoder import UNet
 from uniflowmatch.models.utils import get_meshgrid_torch
+from uniflowmatch.models.depth_fusion import DepthFusion, DepthFusionMaskError
 
 CLASSNAME_TO_ADAPTOR_CLASS = {
     "FlowWithConfidenceAdaptor": FlowWithConfidenceAdaptor,
@@ -41,6 +42,33 @@ CLASSNAME_TO_ADAPTOR_CLASS = {
     "Covariance2DAdaptor": Covariance2DAdaptor,
     "ConfidenceAdaptor": ConfidenceAdaptor,
 }
+
+
+# Depth input priority: explicit metric "depth" wins, then the loader's already
+# 3x3-dilated metric depth, then the generic depth map.  Metric units (metres).
+_DEPTH_INPUT_KEYS = ("depth", "dilated_depth_m", "depthmap")
+# Mask input priority: explicit "depth_mask" wins, then the loader's *dilated*
+# window mask (NOT raw_depth_window_mask, which belongs to the raw array), then
+# the generic valid mask.
+_DEPTH_MASK_INPUT_KEYS = ("depth_mask", "dilated_depth_window_mask", "valid_mask")
+
+
+def _select_view_depth(view):
+    """Return (depth_tensor, key) from the per-view depth priority, else (None, None)."""
+    for key in _DEPTH_INPUT_KEYS:
+        value = view.get(key)
+        if value is not None:
+            return value, key
+    return None, None
+
+
+def _select_view_depth_mask(view):
+    """Return (mask_tensor, key) from the per-view mask priority, else (None, None)."""
+    for key in _DEPTH_MASK_INPUT_KEYS:
+        value = view.get(key)
+        if value is not None:
+            return value, key
+    return None, None
 
 
 def is_symmetrized(gt1, gt2):
@@ -146,6 +174,9 @@ class UniFlowMatch(UniFlowMatchModelsBase, PyTorchModelHubMixin):
         adaptors_kwargs: Dict[str, Any] = {},
         # Load Pretrained Weights
         pretrained_checkpoint_path: Optional[str] = None,
+        # Depth Fusion (RGB-D)
+        use_depth_fusion: bool = False,
+        depth_fusion_kwargs: Optional[Dict[str, Any]] = None,
         # Inference Settings
         inference_resolution: Optional[Tuple[int, int]] = (560, 420),  # (W, H)
         *args,
@@ -168,6 +199,10 @@ class UniFlowMatch(UniFlowMatchModelsBase, PyTorchModelHubMixin):
             feature_head_kwargs (Dict[str, Any]): Feature head configuration parameters
             adaptors_kwargs (Dict[str, Any]): Adaptors configuration parameters
             pretrained_checkpoint_path (Optional[str]): Path to pretrained model checkpoint
+            use_depth_fusion (bool): Enable the optional metric-depth fusion (ADR-14
+                Option C). Default ``False`` keeps the model exactly RGB-only.
+            depth_fusion_kwargs (Optional[Dict[str, Any]]): kwargs for ``DepthFusion``
+                (``feature_dim``, ``depth_hidden_dim``, ``gate_init``, ``depth_scale``).
             inference_resolution (Optional[Tuple[int, int]]): Target resolution for inference (W, H)
             *args: Additional arguments passed to parent classes
             **kwargs: Additional keyword arguments passed to parent classes
@@ -193,6 +228,13 @@ class UniFlowMatch(UniFlowMatchModelsBase, PyTorchModelHubMixin):
         self.info_sharing: nn.Module = INFO_SHARING_CLASSES[info_sharing_str][1](**info_sharing_kwargs)
 
         self.head1: nn.Module = self._initialize_prediction_heads(head_type, feature_head_kwargs, adaptors_kwargs)
+
+        # optional metric-depth fusion (zero-gated residual after the RGB encoder)
+        self.use_depth_fusion = bool(use_depth_fusion)
+        if self.use_depth_fusion:
+            self.depth_fusion: Optional[nn.Module] = DepthFusion(**(depth_fusion_kwargs or {}))
+        else:
+            self.depth_fusion = None
 
         # load pretrained weights
         if pretrained_checkpoint_path is not None:
@@ -353,6 +395,27 @@ class UniFlowMatch(UniFlowMatchModelsBase, PyTorchModelHubMixin):
 
         return feat1_list, feat2_list
 
+    def _apply_depth_fusion(self, rgb_feat, view):
+        """Fuse the optional per-view metric depth into an encoder feature map.
+
+        Applied *outside* the (possibly frozen) RGB encoder.  Missing depth ->
+        identity (RGB path).  Depth present but mask missing -> fail fast.
+        """
+        if self.depth_fusion is None:
+            return rgb_feat
+        depth, depth_key = _select_view_depth(view)
+        if depth is None:
+            return rgb_feat
+        mask, _mask_key = _select_view_depth_mask(view)
+        if mask is None:
+            raise DepthFusionMaskError(
+                f"depth supplied via {depth_key!r} but no valid mask found "
+                f"(looked for {_DEPTH_MASK_INPUT_KEYS}); a mask is mandatory for the "
+                f"training forward path"
+            )
+        image_hw = (int(view["img"].shape[-2]), int(view["img"].shape[-1]))
+        return self.depth_fusion(rgb_feat, depth, mask, image_hw=image_hw)
+
     def forward(self, view1, view2) -> UFMOutputInterface:
         """
         Forward interface of correspondence prediction networks.
@@ -385,6 +448,12 @@ class UniFlowMatch(UniFlowMatchModelsBase, PyTorchModelHubMixin):
 
         # Encode the two images --> Each feat output: BCHW features (batch_size, feature_dim, feature_height, feature_width)
         feat1_list, feat2_list = self._encode_symmetrized(view1, view2, view1["symmetrized"])
+
+        # Optional metric-depth fusion, applied *outside* the (possibly frozen)
+        # RGB encoder so gradients to the depth adapter/gate are never severed.
+        if self.depth_fusion is not None:
+            feat1_list[-1] = self._apply_depth_fusion(feat1_list[-1], view1)
+            feat2_list[-1] = self._apply_depth_fusion(feat2_list[-1], view2)
 
         # Pass the features through the info_sharing
         info_sharing_input = MultiViewTransformerInput(features=[feat1_list[-1], feat2_list[-1]])
@@ -464,11 +533,15 @@ class UniFlowMatch(UniFlowMatchModelsBase, PyTorchModelHubMixin):
                 - "output_head": Parameters from the prediction head
         """
 
-        return {
+        groups = {
             "encoder": torch.nn.ParameterList(self.encoder.parameters()),
             "info_sharing": torch.nn.ParameterList(self.info_sharing.parameters()),
             "output_head": torch.nn.ParameterList(self.head1.parameters()),
         }
+        # additive, non-duplicated group for the optional depth adapter + gate
+        if getattr(self, "depth_fusion", None) is not None:
+            groups["depth_fusion"] = torch.nn.ParameterList(self.depth_fusion.parameters())
+        return groups
 
 
 class UniFlowMatchConfidence(UniFlowMatch, PyTorchModelHubMixin):
@@ -502,6 +575,9 @@ class UniFlowMatchConfidence(UniFlowMatch, PyTorchModelHubMixin):
         # Load Pretrained Weights
         pretrained_backbone_checkpoint_path: Optional[str] = None,
         pretrained_checkpoint_path: Optional[str] = None,
+        # Depth Fusion (RGB-D)
+        use_depth_fusion: bool = False,
+        depth_fusion_kwargs: Optional[Dict[str, Any]] = None,
         # Inference Settings
         inference_resolution: Optional[Tuple[int, int]] = (560, 420),  # WH
         *args,
@@ -525,6 +601,8 @@ class UniFlowMatchConfidence(UniFlowMatch, PyTorchModelHubMixin):
             uncertainty_adaptors_kwargs (Dict[str, Any]): Uncertainty adaptors configuration
             pretrained_backbone_checkpoint_path (Optional[str]): Path to pretrained backbone checkpoint
             pretrained_checkpoint_path (Optional[str]): Path to pretrained full model checkpoint
+            use_depth_fusion (bool): Enable optional metric-depth fusion (ADR-14 Option C)
+            depth_fusion_kwargs (Optional[Dict[str, Any]]): kwargs for ``DepthFusion``
             inference_resolution (Optional[Tuple[int, int]]): Target resolution for inference (W, H)
             *args: Additional arguments passed to parent classes
             **kwargs: Additional keyword arguments passed to parent classes
@@ -540,6 +618,8 @@ class UniFlowMatchConfidence(UniFlowMatch, PyTorchModelHubMixin):
             feature_head_kwargs=feature_head_kwargs,
             adaptors_kwargs=adaptors_kwargs,
             pretrained_checkpoint_path=pretrained_backbone_checkpoint_path,
+            use_depth_fusion=use_depth_fusion,
+            depth_fusion_kwargs=depth_fusion_kwargs,
             inference_resolution=inference_resolution,
             *args,
             **kwargs,
@@ -591,6 +671,12 @@ class UniFlowMatchConfidence(UniFlowMatch, PyTorchModelHubMixin):
 
         # Encode the two images --> Each feat output: BCHW features (batch_size, feature_dim, feature_height, feature_width)
         feat1_list, feat2_list = self._encode_symmetrized(view1, view2, view1["symmetrized"])
+
+        # Optional metric-depth fusion, applied *outside* the (possibly frozen)
+        # RGB encoder so gradients to the depth adapter/gate are never severed.
+        if self.depth_fusion is not None:
+            feat1_list[-1] = self._apply_depth_fusion(feat1_list[-1], view1)
+            feat2_list[-1] = self._apply_depth_fusion(feat2_list[-1], view2)
 
         # Pass the features through the info_sharing
         info_sharing_input = MultiViewTransformerInput(features=[feat1_list[-1], feat2_list[-1]])
@@ -674,12 +760,16 @@ class UniFlowMatchConfidence(UniFlowMatch, PyTorchModelHubMixin):
                 - "uncertainty_head": Parameters from the uncertainty estimation head
         """
 
-        return {
+        groups = {
             "encoder": torch.nn.ParameterList(self.encoder.parameters()),
             "info_sharing": torch.nn.ParameterList(self.info_sharing.parameters()),
             "output_head": torch.nn.ParameterList(self.head1.parameters()),
             "uncertainty_head": torch.nn.ParameterList(self.uncertainty_head.parameters()),
         }
+        # additive, non-duplicated group for the optional depth adapter + gate
+        if getattr(self, "depth_fusion", None) is not None:
+            groups["depth_fusion"] = torch.nn.ParameterList(self.depth_fusion.parameters())
+        return groups
 
     def _downstream_head(self, head_num, decout, img_shape):
         """
@@ -878,6 +968,12 @@ class UniFlowMatchClassificationRefinement(UniFlowMatch, PyTorchModelHubMixin):
 
         # Encode the two images --> Each feat output: BCHW features (batch_size, feature_dim, feature_height, feature_width)
         feat1_list, feat2_list = self._encode_symmetrized(view1, view2, view1["symmetrized"])
+
+        # Optional metric-depth fusion, applied *outside* the (possibly frozen)
+        # RGB encoder so gradients to the depth adapter/gate are never severed.
+        if self.depth_fusion is not None:
+            feat1_list[-1] = self._apply_depth_fusion(feat1_list[-1], view1)
+            feat2_list[-1] = self._apply_depth_fusion(feat2_list[-1], view2)
 
         # Pass the features through the info_sharing
         info_sharing_input = MultiViewTransformerInput(features=[feat1_list[-1], feat2_list[-1]])

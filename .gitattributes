@@ -1,0 +1,8 @@
+# Git attributes for the UFM repository.
+#
+# Preserve the byte-exact upstream AMUSE vendor source
+# (uniflowmatch/training/vendor/amuse/AMUSE.py): its provenance/SHA must remain
+# identical to upstream, so this ONE file is exempted from the default
+# blank-at-eol whitespace check.  Every other source file keeps the normal
+# whitespace rules.
+uniflowmatch/training/vendor/amuse/AMUSE.py whitespace=-blank-at-eol

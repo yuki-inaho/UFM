@@ -1,0 +1,19 @@
+# Experiment preset: short -- 8 updates (bounded gate before FULL).
+name: short
+max_updates: 8
+epochs: null
+validate_every_updates: 4
+save_every_updates: 4
+# cap the validation population for the short gate (public null => external).
+validation_max_pairs: 4
+early_stop: false
+full_budget_fixed: false
+eligible_train_population: null
+
+comparison:
+  selfsup_matched: true
+  fixed_seed: 20261012
+  fixed_optimizer: true
+  fixed_budget: true
+  fixed_split: true
+  run_by_step: 21

@@ -1,0 +1,54 @@
+# Model group: pretrained-compatible UFM RGB-D (ADR-14 Option C fusion).
+#
+# Public identity (HF model id / revision / pretrained sha / bytes) is allowed
+# in tracked source.  Local asset paths + config sha + DINO hub dir are PRIVATE
+# and come from the external resolved config.  Architecture kwargs are derived
+# from the original RGB model args (configs/model/uniflowmatch_rgbd.yaml).
+class: UniFlowMatchConfidence
+arch_config: uniflowmatch_rgbd
+
+public:
+  model_id: infinity1096/UFM-Base
+  revision: cb60fe3d33ace8bbe1416a1e93de0807336927c1
+  pretrained_sha256: b11d1c27bb39edd59b95df365f1754d1500af14fdf40940f4826436a4a55fce6
+  pretrained_bytes: 1713090876
+
+# PRIVATE (Git-external) asset locations
+assets:
+  asset_path: null
+  config_path: null
+  config_sha256: null
+  dino_hub_dir: null
+# expected python tree sha of the local facebookresearch/dinov2 hub tree
+dino_python_tree_sha256: 929c0b25f4287511f065c8696667b39d2b9499c68f284bcab30b3e27099a488f
+
+# depth fusion (RGB-D): zero-init gate => exact RGB identity at init
+use_depth_fusion: true
+depth_fusion_kwargs:
+  feature_dim: 1024
+  depth_hidden_dim: 64
+  gate_init: 0.0
+  depth_scale: 1.3
+
+# master weights stay Float32; train autocast candidate bf16; CPU Float32.
+master_precision: float32
+train_precision: bf16
+cpu_precision: float32
+
+# encoder_freeze=True; info-sharing + heads + depth are trainable.
+freeze:
+  encoder: true
+  info_sharing: false
+  output_head: false
+  uncertainty_head: false
+  depth_fusion: false
+
+# explicit parameter-group policy (consumed by 17B optimizer wrapper).
+param_group_policy:
+  frozen: [encoder]
+  muon_hidden_matrix:
+    modules: [info_sharing, depth_fusion]
+    exclude_name_patterns: [embedding, output_head, uncertainty_head, bias, norm, gate]
+  aux_fallback:
+    modules: [output_head, uncertainty_head]
+    include: [biases, norms, embeddings, scalars, gate]

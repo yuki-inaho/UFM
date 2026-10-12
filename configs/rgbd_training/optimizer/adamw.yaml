@@ -1,0 +1,16 @@
+# Optimizer group: AdamW comparison preset (AMUSE remains the default).
+name: adamw
+default: false
+schedule_free: false
+external_scheduler: cosine   # AdamW preset uses the existing cosine schedule
+lr: 1.0e-4
+weight_decay: 0.05
+betas: [0.9, 0.95]
+eps: 1.0e-8
+groups:
+  all:
+    lr: ${optimizer.lr}
+    weight_decay: ${optimizer.weight_decay}
+gradient_clip:
+  algorithm: norm
+  value: 1.0

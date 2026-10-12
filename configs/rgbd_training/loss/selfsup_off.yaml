@@ -1,0 +1,41 @@
+# Loss group: masked supervised teacher flow + optional covis proxy BCE.
+# `teacher is pseudo, not GT`.  self-supervised augmentation consistency is OFF
+# in this preset (matched OFF/ON comparison runs the same everything else).
+name: selfsup_off
+supervised:
+  # teacher flow supervision (pseudo labels), masked to valid/covis support
+  flow:
+    class: FlowEPELoss
+    multiplier: 1.0
+    supervision_range: occlusion
+    minimum_mask_threshold: 0.1
+  # optional covisibility proxy BCE (pseudo teacher)
+  covis_bce:
+    class: CrossEntropyLoss
+    multiplier: 1.0
+    target: occlusion
+    target_supervision_mask: occlusion_supervision_mask
+
+selfsup:
+  enabled: false
+  weight: 0.0            # OFF weight candidate
+  warmup_updates: 100    # warmup candidate (updates)
+  # augmentation consistency: original prediction.detach() vs augmented prediction
+  detach_original_prediction: true
+  same_geometry: true    # RGB/depth/masks/K/flow share one geometry
+  aug:
+    hflip: true
+    photometric: true
+    crop: false          # crop/complex warp OFF by default
+    complex_warp: false
+
+# non-rigid scenes: planar homography loss OFF (default).
+homography:
+  enabled: false
+
+# optional Laplace NLL defaults OFF: the existing model has no flow covariance,
+# so sigma must NOT be faked.  Adoption requires explicit model-capability
+# validation and a detached residual.
+laplace_nll:
+  enabled: false
+  detach_residual: true

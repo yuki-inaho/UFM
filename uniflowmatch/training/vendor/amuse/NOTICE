@@ -1,0 +1,26 @@
+AMUSE -- Anytime Muon with Stable Gradient Evaluation
+======================================================
+
+This directory vendors the official AMUSE optimizer implementation so that the
+UFM RGB-D fine-tuning wrapper can build a pinned, reproducible optimizer
+without importing the full reference repository.
+
+Upstream project : AMUSE
+Source repository: https://github.com/kjeiun/amuse
+Source file      : src/optim/AMUSE.py
+Pinned commit    : 48922743b32f33f919ab54edde3dbad0d0ce2dc7
+Commit date      : 2026-07-14 01:50:24 +0000
+License          : Apache License 2.0 (see the LICENSE file in this directory)
+
+Vendored artifacts and their SHA-256 digests (byte-exact copies of upstream):
+
+  AMUSE.py  sha256 84fd3fbbc99e1718cf1c821ceff3369439f48e6fbd8ecc3a2b83afa5d82eea1f
+  LICENSE   sha256 c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4
+
+The vendored source is included UNMODIFIED. All modifications needed to drive
+the RGB-D fine-tuning (parameter grouping, mode/serialization control, strict
+resume) live in the sibling wrapper module, not in AMUSE.py.
+
+Modifications to the vendored file: NONE.
+
+BibTeX / citation: see the upstream README for the canonical citation entry.

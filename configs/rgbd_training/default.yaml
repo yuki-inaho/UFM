@@ -1,0 +1,100 @@
+# Root Hydra config for private-paired UFM RGB-D fine-tuning (UFM_STEP17A_HYDRA_CONFIG).
+#
+# This is an *additive* config tree; the existing `configs/*.yaml` are untouched.
+# All private values (dataset index path/sha, pretrained asset paths, DINO hub
+# dir, occlusion-supervision path) are intentionally left `null` here and are
+# supplied ONLY by an external resolved config (Git-external).  Public info
+# (HF model id / revision / pretrained sha, resolution, presets) lives here.
+#
+# `hydra.job.chdir=false` keeps the CWD stable; `hydra.run.dir`,
+# `hydra.sweep.dir` and `resolved_output_dir` are explicitly Git-external roots
+# taken from env vars with a generic /tmp default (never a private host path).
+
+defaults:
+  - _self_
+  - dataset: paired_rgbd
+  - model: ufm_rgbd
+  - optimizer: amuse
+  - loss: default
+  - experiment: smoke
+
+hydra:
+  job:
+    chdir: false
+    name: ufm_rgbd_training
+  run:
+    dir: ${oc.env:UFM_RGBD_RUN_ROOT,/tmp/ufm_rgbd_runs}/rgbd_training/${now:%Y%m%d_%H%M%S}
+  output_subdir: null
+  sweep:
+    dir: ${oc.env:UFM_RGBD_RUN_ROOT,/tmp/ufm_rgbd_runs}/sweep
+    subdir: .
+
+# Git-external root for the resolved yaml + config sha (candidate for 17B/17C).
+resolved_output_dir: ${oc.env:UFM_RGBD_RESOLVED_ROOT,/tmp/ufm_rgbd_runs}/resolved
+
+# external private resolved config (Git-external). null => compose-only / dry-run.
+external_config: null
+# dry_run=true: validate + print a REDACTED config, write nothing.
+dry_run: false
+
+seed: 20261012
+# non-finite loss/gradient must fail fast (no NaN->zero replacement).
+fail_nonfinite: true
+
+# --------------------------------------------------------------------------- #
+# checkpoint / strict-resume contract (fields consumed by 17B/17C)
+# --------------------------------------------------------------------------- #
+checkpoint:
+  dir: ${oc.env:UFM_RGBD_RUN_ROOT,/tmp/ufm_rgbd_runs}/rgbd_training/checkpoints
+  # training iterate (y) and best averaged iterate (x) are separate artifacts.
+  save_last_y: true
+  save_best_averaged_x: true
+  metadata:
+    last_y:
+      param_state: y
+      purpose: resume
+    best_averaged_x:
+      param_state: x
+      purpose: best_eval
+  strict_resume:
+    require_rng: true
+    require_global_step: true
+    require_epoch: true
+    require_sampler_permutation: true
+    require_consumed_cursor: true
+    require_config_sha: true
+    require_data_sha: true
+    require_weight_sha: true
+    require_source_sha: true
+
+# --------------------------------------------------------------------------- #
+# reproducibility / determinism controls (consumed by the trainer entry 17C/19).
+#
+# This is a *generic* group: it only controls PyTorch/cuBLAS runtime flags and
+# never changes the model precision.  Precision is selected separately by
+# `model.train_precision` (default bf16; override with an external Hydra value,
+# e.g. `model.train_precision=float32`, for the Float32 determinism attempt).
+#
+# `warn_only=true` is intentional: PyTorch 2.7 has no deterministic CUDA
+# implementation for the DPT bilinear backward, so strict mode would abort the
+# run.  We keep the warning visible rather than hiding it; this is NOT a strict
+# bitwise guarantee.
+# --------------------------------------------------------------------------- #
+determinism:
+  enabled: true
+  # torch.use_deterministic_algorithms(enabled, warn_only=...)
+  warn_only: true
+  # must be set BEFORE the first cuBLAS/CUDA call.
+  cublas_workspace_config: ":4096:8"
+  cudnn_benchmark: false
+  cudnn_deterministic: true
+  # disallow TF32 matmul/cudnn reductions.
+  allow_tf32: false
+  # bounded single-forward-scope hooks (consumed by
+  # uniflowmatch.training.rgbd_deterministic_ops.deterministic_forward_context):
+  #   sdpa_backend: default | math        (math = SDPA restricted to SDPBackend.MATH)
+  #   bilinear:     default | deterministic (deterministic = F.interpolate bilinear/4D
+  #                                          routed to the deterministic helper)
+  # `default` changes nothing; the real strict run overrides both.
+  sdpa_backend: default
+  bilinear: default
