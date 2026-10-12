@@ -2,7 +2,7 @@
 uniflowmatch.egg-info/**
 ufm_model_refine/**
 ufm_model/**
-/home/inf/UniFlowMatch/convert_old_ckpt.py
+/convert_old_ckpt.py
 checkpoints/**
 .DS_Store
 
@@ -154,3 +154,8 @@ skyseg.onnx
 *.egg-info
 
 .vscode
+# Privacy guard (UFM_RGBD_STEP03): never commit private dataset artifacts
+/data/
+/outputs/
+/runs/
+/private/
