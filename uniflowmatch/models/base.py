@@ -62,6 +62,7 @@ class UFMClassificationRefinementOutput:
     temperature: Optional[torch.Tensor] = None
     attention_bias: Optional[torch.Tensor] = None
 
+
 @dataclass
 class UFMOutputInterface:
     """
@@ -91,16 +92,30 @@ class UniFlowMatchModelsBase(torch.nn.Module):
     def __init__(self, inference_resolution: Optional[Union[List[Tuple[int, int]], Tuple[int, int]]] = None):
         super().__init__()
 
-        if inference_resolution is None:
-            inference_resolution = [(560, 420)]
-
-        if isinstance(inference_resolution[0], int):  # Handle the case for single resolution
-            inference_resolution = [inference_resolution]
-
+        # the setter normalizes the value and (re)builds the image scaler
         self.inference_resolution = inference_resolution
 
+    @property
+    def inference_resolution(self):
+        """Inference resolutions as ``[(width, height), ...]`` (first = default)."""
+        return self._inference_resolution
+
+    @inference_resolution.setter
+    def inference_resolution(self, value):
+        """Assigning a new resolution rebuilds the image scaler accordingly.
+
+        This makes ``model.inference_resolution = (width, height)`` after
+        construction take effect (the scaler must target the same resolution the
+        model is exported/run at).
+        """
+        if value is None:
+            value = [(560, 420)]
+        if isinstance(value[0], int):  # Handle the case for single resolution
+            value = [value]
+        value = [tuple(int(v) for v in resolution) for resolution in value]
+        self._inference_resolution = value
         self.image_scaler = AutomaticShapeSelection(
-            *[ResizeToFixedManipulation((resolution[1], resolution[0])) for resolution in inference_resolution],
+            *[ResizeToFixedManipulation((resolution[1], resolution[0])) for resolution in value],
             strategy="closest_aspect",  # will inference on the trained aspect ratio that is closest to the input image 1
         )
 
@@ -337,6 +352,14 @@ class UniFlowMatchModelsBase(torch.nn.Module):
         )
         return A @ K
 
+    def _model_device(self) -> torch.device:
+        """Device of the first model parameter/buffer (models are non-empty)."""
+        for parameter in self.parameters():
+            return parameter.device
+        for buffer in self.buffers():
+            return buffer.device
+        return torch.device("cpu")
+
     def _predict_correspondences_batched(
         self,
         source_image: torch.Tensor,
@@ -359,6 +382,18 @@ class UniFlowMatchModelsBase(torch.nn.Module):
         assert source_image.dtype == torch.float32, "source_image must be of dtype torch.float32"
         assert target_image.dtype == torch.float32, "target_image must be of dtype torch.float32"
 
+        # Follow the model's device: callers routinely pass CPU tensors
+        # (e.g. ``torch.from_numpy``) even when the model lives on CUDA, and the
+        # encoder cannot mix CPU activations with CUDA weights (autocast turns
+        # that combination into an opaque dtype error).
+        model_device = self._model_device()
+        source_image = source_image.to(model_device)
+        target_image = target_image.to(model_device)
+        source_depth = None if source_depth is None else source_depth.to(model_device)
+        target_depth = None if target_depth is None else target_depth.to(model_device)
+        source_depth_mask = None if source_depth_mask is None else source_depth_mask.to(model_device)
+        target_depth_mask = None if target_depth_mask is None else target_depth_mask.to(model_device)
+
         source_shape_hw = source_image.shape[2:]
         target_shape_hw = target_image.shape[2:]
 
@@ -374,6 +409,13 @@ class UniFlowMatchModelsBase(torch.nn.Module):
 
         scaled_img0 = scaled_img0.permute(0, 3, 1, 2)
         scaled_img1 = scaled_img1.permute(0, 3, 1, 2)
+
+        # the scaler records regions as plain CPU tensors; keep every tensor that
+        # meets the prediction (or its unmapping) on the model device
+        img0_region_source = img0_region_source.to(model_device)
+        img1_region_source = img1_region_source.to(model_device)
+        img0_region_representation = img0_region_representation.to(model_device)
+        img1_region_representation = img1_region_representation.to(model_device)
 
         # Run a forward pass
         view1 = {"img": scaled_img0, "symmetrized": False, "data_norm_type": self.encoder.data_norm_type}
