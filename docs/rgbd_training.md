@@ -1,10 +1,14 @@
-# RGB-D fine-tuning and evaluation for UFM
+# RGB and RGB-D fine-tuning and evaluation for UFM
 
-This document explains how to fine-tune the released UFM model on paired RGB-D
-captures and how to score the resulting variants.  It is written for a generic
-user who has their own paired RGB-D captures already prepared.  No dataset
-identifier, host path, calibration array, or result number is embedded here;
-every private value is supplied at run time through a Git-external descriptor.
+This document explains how to fine-tune and evaluate the released UFM model in
+**two modes that share one code path**: a **generic RGB-only** mode
+(`use_depth_fusion: false`, no depth consumed) and an **RGB-D** mode (zero-gated
+post-encoder depth residual, gate init `0.0`).  It is written for a generic user
+who has their own captures already prepared, with or without depth.  The doc
+covers both modes throughout and names which mode each contract applies to.  No
+dataset identifier, host path, calibration array, or result number is embedded
+here; every private value is supplied at run time through a Git-external
+descriptor.
 
 The RGB-D support is **additive**: the RGB API and the default RGB path are
 **preserved**, and the RGB-D functionality is added through **optional hooks**
@@ -259,7 +263,8 @@ model is `depth` -> `dilated_depth_m` -> `depthmap`; mask priority is
 Public source never embeds private asset locations.  The public model config
 (`configs/rgbd_training/model/ufm_rgbd.yaml`) records only public identity
 (Hugging Face model id / revision / weight SHA / byte size, the DINO python-tree
-SHA, and the architecture kwargs).  The following are **PRIVATE** and must come
+SHA, and the architecture kwargs).  The sibling `configs/rgbd_training/model/ufm_rgb_only.yaml`
+records the same public identity for the **true RGB-only** mode.  The following are **PRIVATE** and must come
 from a Git-external resolved config (or, for evaluation, a Git-external JSON
 descriptor):
 
@@ -281,6 +286,18 @@ aggregate python-tree SHA, `pretrained=False`); a moving `github/main` download
 is never used.  Released weights are verified by SHA256/byte size before the
 bytes are read.
 
+The **source pin** is the real `UniCeption` submodule commit of the pinned local
+checkout, read at run time and verified against the constant in the training
+entry point.  It is advanced together with the upstream integration
+(`ee7fa0b50d8295b3f0485e42c1d133fb534bfce7`); the previous pin is kept only as
+history.  Because the pin is part of the strict resume identity, a checkpoint
+written under the previous source/pin is rejected before any state is copied --
+the source-SHA / pin guard is intentionally **never loosened**.  Resuming such a
+checkpoint therefore requires **both the original public source and the original
+`UniCeption` checkout** it was produced with (the original source SHA list and
+the original submodule commit); the guard must **not** be relaxed to push an old
+checkpoint into the new source.
+
 ---
 
 ## 6. Hydra composition and presets
@@ -295,12 +312,27 @@ Presets (`configs/rgbd_training/experiment/`):
 |--------|---------|-----------|------|-------|
 | `smoke` | `max_updates: 1` | every update, `validation_max_pairs: 2` | every update | fast gate |
 | `short` | `max_updates: 8` | every 4 updates, `validation_max_pairs: 4` | every 4 updates | bounded gate |
-| `full` | epoch-bounded (`epochs: 12`), no `max_updates` | full population every epoch | every epoch | `full_budget_fixed` must be `true` first |
+| `full` | epoch-bounded, no `max_updates` | full population every epoch | every epoch | `full_budget_fixed` must be `true` first |
 
-The shipped `epochs: 12` in `experiment/full` is only a **public candidate**
-default.  The real FULL epoch count is fixed **externally** (as a Hydra
-override) only **after the capacity measurement**; the committed value must not
-be treated as the measured budget.
+The **canonical FULL budget is explicitly 10 epochs** over the entire eligible
+train population, fixed from the approved matched capacity measurement and
+applied as an external Hydra override.  The `epochs` value shipped inside
+`experiment/full` is only a **public placeholder** and must never be read as the
+measured budget; the resolved budget is what the training entry point records in
+the resume identity.
+
+### Model presets (generic RGB / RGB-D modes)
+
+The modality is selected by the model preset and composes with any dataset /
+optimizer / loss / experiment group:
+
+| Preset | Mode |
+|--------|------|
+| `configs/rgbd_training/model/ufm_rgb_only.yaml` | **true RGB-only** (`use_depth_fusion: false`, no depth kwargs) |
+| `configs/rgbd_training/model/ufm_rgbd.yaml` | **RGB-D** (`use_depth_fusion: true`, zero-gated depth residual) |
+
+Both presets use the same `UniFlowMatchConfidence` architecture and the same
+released RGB weights; the true RGB-only model consumes no depth field at all.
 
 Validation rules (fail-fast):
 * `smoke`/`short` require a positive `max_updates` and an explicit positive
@@ -371,7 +403,13 @@ the training iterate `y`.  Validation runs the averaged `x` state
 Resume is **strict**: a semantic identity (public source SHA list, released
 weight SHA, dataset-index SHA, resume-config SHA, UniCeption pin; the local DINO
 python-tree SHA and asset config SHA are recorded as separate fields) is
-compared **before** any state is copied.  RNG (python/numpy/torch/CUDA),
+compared **before** any state is copied.  The UniCeption pin is the real
+submodule commit (`ee7fa0b50d8295b3f0485e42c1d133fb534bfce7`) read from the
+pinned local checkout; advancing the pin changes the identity, so an old-resume
+guarantee is **not** silently carried over -- a checkpoint from the previous
+source/pin is rejected rather than partially applied.  Resuming it would require
+the **original source and the original `UniCeption` checkout**, and the guard is
+**never** loosened to accept an old checkpoint under the new source.  RNG (python/numpy/torch/CUDA),
 `global_step`, `epoch`, the sampler permutation and its consumed cursor, the
 dedicated augmentation and dataloader generators, and the best-monitor are all
 persisted.  Loading a `best_averaged_x` checkpoint for resume is rejected
@@ -512,15 +550,21 @@ FULL run.
 
 ## 15. Running evaluation
 
-`scripts/evaluate_rgbd.py` scores four variants over **all** pairs of one split
-with an identical pair order/ input / mask population:
+`scripts/evaluate_rgbd.py` scores a set of variants over **all** pairs of one
+split with an identical pair order / input / mask population.  There is a
+**canonical set of 4** and an **optional set of 2**:
 
-| Variant | Meaning |
-|---------|---------|
-| `rgb_pretrained` | released UFM-Base, RGB encoder only (no fusion) |
-| `rgbd_pretrained_init` | released base migrated to RGB-D (gate `0`) |
-| `rgbd_off` | trained RGB-D checkpoint, self-supervision OFF |
-| `rgbd_on` | trained RGB-D checkpoint, self-supervision ON |
+| Variant | Set | Meaning |
+|---------|-----|---------|
+| `rgb_pretrained` | canonical | released UFM-Base, RGB encoder only (no fusion) |
+| `rgbd_pretrained_init` | canonical | released base migrated to RGB-D (gate `0`) |
+| `rgbd_off` | canonical | trained RGB-D checkpoint, self-supervision OFF |
+| `rgbd_on` | canonical | trained RGB-D checkpoint, self-supervision ON |
+| `rgb_off` | optional | trained **RGB** (depth-free) checkpoint, self-supervision OFF |
+| `rgb_on` | optional | trained **RGB** (depth-free) checkpoint, self-supervision ON |
+
+`--variants` selects the subset; it defaults to the canonical 4, and the optional
+2 are added explicitly (for example `rgb_off,rgb_on`).
 
 Every value comes from a Git-external JSON **descriptor**; no private dataset
 identifier, path, count, calibration or result is embedded.
@@ -533,14 +577,37 @@ python scripts/evaluate_rgbd.py \
     --output-dir ../private/eval_out \
     --variants rgb_pretrained,rgbd_pretrained_init,rgbd_off,rgbd_on \
     --device cuda --gpu 0
+
+# Add the two optional RGB-trained variants (depth-free):
+python scripts/evaluate_rgbd.py \
+    --descriptor ../private/eval_descriptor.json \
+    --dataset-index ../private/index.json \
+    --split val \
+    --output-dir ../private/eval_out \
+    --variants rgb_pretrained,rgbd_pretrained_init,rgbd_off,rgbd_on,rgb_off,rgb_on \
+    --device cuda --gpu 0
 ```
 
 The descriptor requires the top-level objects `dataset`, `assets`, `model`,
 `variants`, `determinism`, and a `role`.  `dataset.resolution` is `[W, H]`;
 `dataset.depth_units` must be metres (a millimetre unit is rejected because the
-loader converts `uint16` mm with a fixed factor).  Each of the four variants
-must be defined with a `kind` (`rgb` / `rgbd_init` / `checkpoint`); a
-`checkpoint` variant also needs `checkpoint_path`.
+loader converts `uint16` mm with a fixed factor).
+
+The `variants` object must define the **canonical 4** (`rgb_pretrained`,
+`rgbd_pretrained_init`, `rgbd_off`, `rgbd_on`); the **optional 2** (`rgb_off`,
+`rgb_on`) are defined **only when used** and are never required.  Each defined
+variant needs a `kind`:
+
+* `rgb` -- released UFM-Base, depth-free (no fusion).
+* `rgbd_init` -- released base migrated to RGB-D (zero gate).
+* `checkpoint` -- an RGB-D trained checkpoint; **requires `checkpoint_path`**.
+* `rgb_checkpoint` -- a depth-free RGB trained checkpoint; **also requires
+  `checkpoint_path`**.
+
+Both checkpoint-backed kinds (`checkpoint` and `rgb_checkpoint`) therefore
+**require `checkpoint_path`** -- the validator rejects either kind when
+`checkpoint_path` is absent.  `rgb` / `rgb_checkpoint` are depth-free (no
+fusion), while `rgbd_init` / `checkpoint` use the zero-gated RGB-D module.
 
 Contracts enforced: the staged index grid (`teacher_reference_hw` and every
 pair's `reference_hw`) must equal the model target `(H, W)` so nothing is
@@ -575,3 +642,127 @@ frame ids, query ids, timestamps and calibration all arrive from the caller.
 
 A pre-stage privacy guard is available at
 `scripts/check_public_stage.py` (inspects staged index blobs or `--paths`).
+
+---
+
+## 17. Released RGB weights: strict load and `predict_correspondences_batched`
+
+This section describes loading the **original** released UFM-Base asset and, for
+reference, the **separate** OFF model-only release asset.  They are different
+files with different identities and are **not** interchangeable.  Both are
+loaded strictly -- never through the ModelHub mixin's silent `strict=False`.
+
+### Original UFM-Base asset (deduplicated, shared-storage aliases)
+
+The original released asset stores its state **deduplicated**: its real
+safetensors file has **613 canonical entries**, and the sharing is recorded in
+the file's `__metadata__` (16 alias names, each mapped to a canonical name).
+Building the UFM-Base `UniFlowMatchConfidence` yields a `model.state_dict()` of
+**629** entries because those **16 shared-storage aliases expand** the 613
+canonical entries.  This 613 -> 629 expansion is a property of **this UFM-Base
+structure** and is **not** a claim about every UFM model.
+
+The alias-aware helper `uniflowmatch.models.checkpoint.load_released_state`
+resolves those aliases: **613** keys are copied by canonical name and the **16**
+missing keys are accepted only because each shares storage with a loaded key.
+Any genuine missing key, unexpected key or shape mismatch fails fast.  The asset
+identity (SHA256 / byte size) is verified **before** the weight bytes are read,
+and the model is built against the pinned **local** `facebookresearch/dinov2`
+hub tree under `pretrained=False` (never a moving `github/main` download).
+
+### OFF model-only release asset (materialised, all keys)
+
+The published **OFF** model-only release asset
+(`.../releases/tag/rgb-only-off-20261013`) is a **separate** artifact: it
+materialises every alias into its own contiguous tensor, so it contains **all
+629 keys** for this UFM-Base structure and loads with an ordinary
+`model.load_state_dict(load_file(...), strict=True)` -- no alias handling
+required.  It is a depth-free (`use_depth_fusion=false`) RGB model.  Do not mix
+its identity with the original asset above.
+
+The snippet below uses generic run-time paths and the true RGB-only preset; it
+makes no claim about any trained checkpoint.  The expected size / digest are
+**generic variables** you replace after independently verifying them, and the
+file is read from a Git-external location.
+
+```python
+import json
+import torch
+from uniflowmatch.models.checkpoint import (
+    verify_file_identity, load_checkpoint, extract_state_dict, load_released_state,
+)
+from uniflowmatch.models.ufm import UniFlowMatchConfidence
+from uniflowmatch.training.rgbd_trainer import local_dino_hub
+
+ASSET = "<path-to>/ufm_base_pretrained/model.safetensors"   # Git-external
+CONFIG = "<path-to>/ufm_base_pretrained/config.json"        # Git-external
+DINO_HUB = "<path-to>/torch_hub/hub/facebookresearch_dinov2_main"
+
+EXPECTED_WEIGHT_BYTES = 0                 # replace with the verified size
+EXPECTED_WEIGHT_SHA256 = "<verified-sha256>"
+
+model_kwargs = json.load(open(CONFIG))
+for k in ("pretrained_checkpoint_path", "pretrained_backbone_checkpoint_path",
+          "use_depth_fusion", "depth_fusion_kwargs"):
+    model_kwargs.pop(k, None)
+
+with local_dino_hub(DINO_HUB, "dinov2_vitl14", "<dino_python_tree_sha256>",
+                    pretrained=False):
+    model = UniFlowMatchConfidence(**model_kwargs)   # true RGB-only, depth-free
+
+verify_file_identity(ASSET, expected_sha256=EXPECTED_WEIGHT_SHA256,
+                     expected_bytes=EXPECTED_WEIGHT_BYTES)
+state = load_checkpoint(ASSET, weights_only=True, map_location="cpu")
+load_released_state(model, extract_state_dict(state), require_fp32=True)
+
+source_image = torch.randint(0, 256, (1, 480, 640, 3), dtype=torch.uint8)
+target_image = torch.randint(0, 256, (1, 480, 640, 3), dtype=torch.uint8)
+with torch.inference_mode():
+    result = model.predict_correspondences_batched(
+        source_image=source_image,
+        target_image=target_image,
+    )
+    flow = result.flow.flow_output            # (B, 2, H, W)
+    covisibility = result.covisibility.mask   # (B, H, W)
+```
+
+For the **OFF model-only release asset** the load is the ordinary strict load,
+because the release asset is materialised and complete:
+
+```python
+import json
+import torch
+from safetensors.torch import load_file
+from uniflowmatch.models.ufm import UniFlowMatchConfidence
+
+OFF_ASSET = "<path-to>/ufm-rgb-only-selfsup-off.safetensors"  # Git-external
+OFF_CONFIG = "<path-to>/config.json"                          # Git-external
+
+kwargs = json.loads(open(OFF_CONFIG).read())
+kwargs["use_depth_fusion"] = False
+model = UniFlowMatchConfidence(**kwargs)
+model.load_state_dict(load_file(OFF_ASSET), strict=True)
+model.eval()
+
+source_image = torch.randint(0, 256, (1, 480, 640, 3), dtype=torch.uint8)
+target_image = torch.randint(0, 256, (1, 480, 640, 3), dtype=torch.uint8)
+with torch.inference_mode():
+    result = model.predict_correspondences_batched(source_image, target_image)
+    flow = result.flow.flow_output            # (B, 2, H, W)
+    covisibility = result.covisibility.mask   # (B, H, W)
+```
+
+`predict_correspondences_batched(self, source_image, target_image,
+data_norm_type=None, source_depth=None, target_depth=None, depth_mask=None,
+camera_intrinsics=None, source_depth_mask=None, target_depth_mask=None)` takes
+`uint8` or `float32` image tensors in `BHWC` / `BCHW`; `uint8` inputs are
+normalised internally, while `float32` inputs must pass a `data_norm_type`.  The
+true RGB-only model consumes **no** depth or camera inputs, so those keyword
+arguments are simply omitted.
+
+> Note: the upstream CLI (`ufm infer`, see `example_inference.py`) additionally
+> exposes **DINO-init** variants (`base-dinov2l-init` / `base-dinov2g-init`)
+> that are DINOv2-initialised UFM models.  They are distinct from the trainer's
+> current RGB / RGB-D presets, which both build `UniFlowMatchConfidence` from the
+> released **UFM-Base** weights (`configs/rgbd_training/model/*.yaml`).  Pick the
+> preset (and therefore the weight asset) that matches what you actually load.

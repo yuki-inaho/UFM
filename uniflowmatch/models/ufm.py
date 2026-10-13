@@ -207,8 +207,17 @@ class UniFlowMatch(UniFlowMatchModelsBase, PyTorchModelHubMixin):
             *args: Additional arguments passed to parent classes
             **kwargs: Additional keyword arguments passed to parent classes
         """
-        UniFlowMatchModelsBase.__init__(self, inference_resolution=inference_resolution, *args, **kwargs)
 
+        # minor adjustment from V0.1.0 uniCeption to V0.6.0 UniCeption
+        info_sharing_replacement_dict = {
+            "max_num_views": "max_num_views_for_pe",
+            "pretrained_checkpoint_path": None
+        }
+
+        info_sharing_kwargs = {info_sharing_replacement_dict.get(k, k): v for k, v in info_sharing_kwargs.items() if info_sharing_replacement_dict.get(k, k) is not None}
+
+
+        UniFlowMatchModelsBase.__init__(self, inference_resolution=inference_resolution, *args, **kwargs)
         PyTorchModelHubMixin.__init__(self)
 
         # assertion on architectures

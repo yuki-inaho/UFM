@@ -109,8 +109,13 @@ def _preflight(resolved) -> int:
 
 
 #: the *real* UniCeption source commit the run is executed against (verified
-#: from the pinned local checkout at run time).
-UNICEpTION_PINNED_COMMIT = "1cff08065666d351b2bbdf2db678a4df196afa43"
+#: from the pinned local checkout at run time).  This was advanced to the
+#: upstream pin together with the fork's upstream integration; the previous pin
+#: (1cff08065666d351b2bbdf2db678a4df196afa43) is retained here only as history.
+#: Resume identity keeps this pin as a strict field: a checkpoint produced under
+#: the previous source/pin is rejected (never silently resumed) by the existing
+#: source-SHA / pin guard, which is intentionally *not* loosened.
+UNICEpTION_PINNED_COMMIT = "ee7fa0b50d8295b3f0485e42c1d133fb534bfce7"
 
 
 def _uniception_commit():
