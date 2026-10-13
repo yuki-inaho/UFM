@@ -555,17 +555,29 @@ def _validate_dataset(ds: Dict[str, Any], require_external: bool) -> None:
 def _validate_model(m: Dict[str, Any], require_external: bool) -> None:
     if not isinstance(m, dict):
         raise ShapeError("model must be a mapping")
-    if m.get("use_depth_fusion") is not True:
-        raise ShapeError("model.use_depth_fusion must be true for the RGB-D fine-tune")
-    fk = m.get("depth_fusion_kwargs")
-    if not isinstance(fk, dict):
-        raise ShapeError("model.depth_fusion_kwargs must be a mapping")
-    if fk.get("gate_init") != 0.0:
-        raise ShapeError("model.depth_fusion_kwargs.gate_init must be 0.0 (RGB identity at init)")
-    if fk.get("depth_hidden_dim") != 64:
-        raise ShapeError("model.depth_fusion_kwargs.depth_hidden_dim must be 64")
-    if fk.get("depth_scale") != 1.3:
-        raise ShapeError("model.depth_fusion_kwargs.depth_scale must be 1.3")
+    use_depth = m.get("use_depth_fusion")
+    if not isinstance(use_depth, bool):
+        raise ShapeError(
+            "model.use_depth_fusion must be a bool (true = RGB-D fusion, false = "
+            f"RGB-only); got {use_depth!r}"
+        )
+    if use_depth:
+        fk = m.get("depth_fusion_kwargs")
+        if not isinstance(fk, dict):
+            raise ShapeError(
+                "model.depth_fusion_kwargs must be a mapping when use_depth_fusion is true"
+            )
+        if fk.get("gate_init") != 0.0:
+            raise ShapeError("model.depth_fusion_kwargs.gate_init must be 0.0 (RGB identity at init)")
+        if fk.get("depth_hidden_dim") != 64:
+            raise ShapeError("model.depth_fusion_kwargs.depth_hidden_dim must be 64")
+        if fk.get("depth_scale") != 1.3:
+            raise ShapeError("model.depth_fusion_kwargs.depth_scale must be 1.3")
+    elif m.get("depth_fusion_kwargs") is not None:
+        raise ShapeError(
+            "model.depth_fusion_kwargs must be absent/null when use_depth_fusion is false "
+            "(no unused depth kwargs for the RGB-only model)"
+        )
 
     if m.get("master_precision") not in _ALLOWED_MASTER_PRECISION:
         raise PrecisionError(
@@ -586,9 +598,17 @@ def _validate_model(m: Dict[str, Any], require_external: bool) -> None:
         raise ShapeError("model.freeze must be a mapping")
     if freeze.get("encoder") is not True:
         raise ShapeError("model.freeze.encoder must be true (encoder_freeze=True)")
-    for name in ("info_sharing", "output_head", "uncertainty_head", "depth_fusion"):
+    for name in ("info_sharing", "output_head", "uncertainty_head"):
         if freeze.get(name) is not False:
             raise ShapeError(f"model.freeze.{name} must be false (trainable)")
+    depth_freeze = freeze.get("depth_fusion")
+    if use_depth:
+        if depth_freeze is not False:
+            raise ShapeError("model.freeze.depth_fusion must be false (trainable)")
+    elif depth_freeze is not None and depth_freeze is not False:
+        raise ShapeError(
+            "model.freeze.depth_fusion must be false or absent for the RGB-only model"
+        )
 
     if not isinstance(m.get("param_group_policy"), (dict,)):
         raise ShapeError("model.param_group_policy must be a mapping")

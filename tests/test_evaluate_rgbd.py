@@ -560,3 +560,114 @@ def test_fp32_guard_rejects_half_model():
     mod._assert_fp32_model(_F32(), "rgb_pretrained")
     with pytest.raises(mod.EvaluationRunError):
         mod._assert_fp32_model(_Half(), "rgb_pretrained")
+
+
+# --------------------------------------------------------------------------- #
+# RGB-trained checkpoint kind / rgb_off / rgb_on variants (additive)
+# --------------------------------------------------------------------------- #
+class _SpyModel(_FakeModel):
+    """RGB-only fake: declares no depth_fusion and refuses depth input keys."""
+
+    depth_fusion = None
+
+    def __init__(self, hw, *, bias=0.0, seen=None):
+        super().__init__(hw, bias=bias)
+        self._seen = seen if seen is not None else []
+
+    def forward(self, view1, view2):
+        for key in ("dilated_depth_m", "raw_depth_m", "depthmap", "depth",
+                    "dilated_depth_window_mask", "raw_depth_window_mask",
+                    "valid_mask", "depth_provenance"):
+            assert key not in view1, f"depth key {key!r} leaked to RGB eval forward"
+            assert key not in view2, f"depth key {key!r} leaked to RGB eval forward"
+        self._seen.append(1)
+        return super().forward(view1, view2)
+
+
+def test_rgb_off_on_variants_build_rgb_and_strip_depth(tmp_path, monkeypatch):
+    root = tmp_path / "stage"
+    index = make_staging(root, [(0, 1), (1, 2)])
+    desc = make_descriptor(
+        tmp_path / "desc.json", index,
+        variants_extra={
+            "rgb_off": {"kind": "rgb_checkpoint", "checkpoint_path": "/nonexistent/rgb_off.pt"},
+            "rgb_on": {"kind": "rgb_checkpoint", "checkpoint_path": "/nonexistent/rgb_on.pt"},
+        },
+    )
+    seen = {"rgb_off": [], "rgb_on": []}
+
+    def factory(name, d, device):
+        if name in ("rgb_off", "rgb_on"):
+            return _SpyModel((H, W), bias=(2.0 if name == "rgb_off" else 3.0),
+                             seen=seen[name])
+        return _FakeModel((H, W))
+
+    monkeypatch.setattr(mod, "_build_variant_model", factory)
+    out = tmp_path / "out"
+    rc = mod.main(["--descriptor", str(desc), "--dataset-index", str(index),
+                   "--split", "val", "--output-dir", str(out),
+                   "--variants", "rgb_pretrained,rgb_off,rgb_on", "--device", "cpu"])
+    assert rc == 0
+    comparison = json.loads((out / "comparison.json").read_text())
+    assert "rgb_off" in comparison["variants"] and "rgb_on" in comparison["variants"]
+    assert seen["rgb_off"] and seen["rgb_on"]  # depth-free forward executed
+    # mode metadata is recorded per variant
+    assert comparison["identity"]["variants"]["rgb_off"]["modality"] == "rgb"
+    assert comparison["identity"]["variants"]["rgb_off"]["gate"] is None
+
+
+def test_validate_descriptor_accepts_rgb_checkpoint_and_requires_path(tmp_path):
+    root = tmp_path / "stage"
+    index = make_staging(root, [(0, 1)])
+    desc = make_descriptor(
+        tmp_path / "desc.json", index,
+        variants_extra={"rgb_off": {"kind": "rgb_checkpoint",
+                                    "checkpoint_path": "/nonexistent/rgb_off.pt"}},
+    )
+    mod.validate_descriptor(json.loads(desc.read_text()))
+
+    bad = make_descriptor(
+        tmp_path / "bad.json", index,
+        variants_extra={"rgb_off": {"kind": "rgb_checkpoint"}},
+    )
+    with pytest.raises(mod.EvaluationRunError):
+        mod.validate_descriptor(json.loads(bad.read_text()))
+
+
+def test_run_accepts_optional_rgb_variants_but_rejects_unknown(tmp_path, monkeypatch):
+    root = tmp_path / "stage"
+    index = make_staging(root, [(0, 1)])
+    desc = make_descriptor(
+        tmp_path / "desc.json", index,
+        variants_extra={"rgb_off": {"kind": "rgb_checkpoint",
+                                    "checkpoint_path": "/nonexistent/rgb_off.pt"}},
+    )
+    monkeypatch.setattr(mod, "_build_variant_model", lambda n, d, dev: _FakeModel((H, W)))
+    with pytest.raises(mod.EvaluationRunError):
+        mod.run(descriptor=json.loads(desc.read_text()), index_path=str(index),
+                split="val", output_dir=str(tmp_path / "o0"), variants=["nope"])
+
+
+def test_rgb_trained_checkpoint_modality_mismatch_rejected(tmp_path):
+    """An RGB-trained (depth-free) state must not strict-load into an RGB-D model."""
+    from uniflowmatch.models.checkpoint import CheckpointStateError
+
+    class _RGBModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.depth_fusion = None
+            self.register_buffer("w", torch.zeros(2))
+
+    class _RGBDModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.depth_fusion = torch.nn.Linear(1, 1)
+            self.register_buffer("w", torch.zeros(2))
+
+    rgb = _RGBModel()
+    rgbd = _RGBDModel()
+    state = {k: v.clone() for k, v in rgb.state_dict().items()}
+    from uniflowmatch.models.checkpoint import strict_load_state_dict
+    # RGB-D model requires the depth_fusion keys the RGB model doesn't have.
+    with pytest.raises(CheckpointStateError):
+        strict_load_state_dict(rgbd, state, require_fp32=True)

@@ -1,0 +1,53 @@
+# Model group: true RGB-only fine-tune (NO depth fusion).
+#
+# This is the original released RGB model: ``use_depth_fusion: false`` so the
+# ``depth_fusion`` module is None (no adapter/gate parameters, no depth keys are
+# ever consumed by the forward).  It is NOT an RGB-D gate-0 alias.
+#
+# Public identity (HF model id / revision / pretrained sha / bytes) is allowed
+# in tracked source.  Local asset paths + config sha + DINO hub dir are PRIVATE
+# and come from the external resolved config.
+class: UniFlowMatchConfidence
+arch_config: uniflowmatch_rgbd
+
+public:
+  model_id: infinity1096/UFM-Base
+  revision: cb60fe3d33ace8bbe1416a1e93de0807336927c1
+  pretrained_sha256: b11d1c27bb39edd59b95df365f1754d1500af14fdf40940f4826436a4a55fce6
+  pretrained_bytes: 1713090876
+
+# PRIVATE (Git-external) asset locations
+assets:
+  asset_path: null
+  config_path: null
+  config_sha256: null
+  dino_hub_dir: null
+# expected python tree sha of the local facebookresearch/dinov2 hub tree
+dino_python_tree_sha256: 929c0b25f4287511f065c8696667b39d2b9499c68f284bcab30b3e27099a488f
+
+# RGB-only: no depth fusion and deliberately NO depth kwargs (nothing unused).
+use_depth_fusion: false
+
+# master weights stay Float32; train autocast candidate bf16; CPU Float32.
+master_precision: float32
+train_precision: bf16
+cpu_precision: float32
+
+# encoder_freeze=True; info-sharing + heads trainable.  There is no depth module,
+# so no depth_fusion freeze entry is required.
+freeze:
+  encoder: true
+  info_sharing: false
+  output_head: false
+  uncertainty_head: false
+
+# explicit parameter-group policy (consumed by the optimizer wrapper).
+# depth_fusion is intentionally absent from the Muon modules.
+param_group_policy:
+  frozen: [encoder]
+  muon_hidden_matrix:
+    modules: [info_sharing]
+    exclude_name_patterns: [embedding, output_head, uncertainty_head, bias, norm, gate]
+  aux_fallback:
+    modules: [output_head, uncertainty_head]
+    include: [biases, norms, embeddings, scalars, gate]
