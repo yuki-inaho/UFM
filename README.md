@@ -41,6 +41,48 @@ We have completed cleaning the data processing, all data should be ready. Please
 - **Logging and visualization support** to monitor training.
 
 > **RGB-D fine-tuning and evaluation:** see [`docs/rgbd_training.md`](docs/rgbd_training.md).
+>
+> **Released checkpoints, ONNX export and ONNX Runtime:** see
+> [`docs/release_onnx.md`](docs/release_onnx.md).
+
+## Released checkpoints (GitHub release page)
+
+Research checkpoints (for example the RGB-only, self-supervision-OFF model
+fine-tuned on this branch) are published on the repository's
+[Releases page](/releases) as verifiable packages (`config.json`,
+`manifest.json`, `SHA256SUMS`, `*.safetensors`). The loader verifies every byte
+(SHA256 + size, cross-checked between `SHA256SUMS` and `manifest.json`) before
+reading tensors, builds the model from the release `config.json`, and
+strict-loads the state:
+
+```bash
+# PyTorch backend (assets are downloaded + verified on first use)
+python scripts/release_infer.py -o outputs/release_torch
+
+# ONNX Runtime GPU backend (optional mode, see below)
+python scripts/release_infer.py --backend onnx \
+    --onnx-model exports/ufm_rgb_only_336x448_simplified.onnx -o outputs/release_onnx
+```
+
+### ONNX export / onnxsim / ONNX Runtime (optional)
+
+ONNX support is an **optional mode**: the default installation is unchanged.
+Use the extras to add the export toolchain and (optionally) the CUDA runtime:
+
+| Extra | Installs | Use |
+|-------|----------|-----|
+| `pip install -e '.[onnx]'` | `onnx`, `onnxscript`, `onnxsim` | export + simplification |
+| `pip install -e '.[onnx-gpu]'` | the above + `onnxruntime-gpu` | export + CUDA inference |
+
+```bash
+python scripts/export_onnx.py --release-tag rgb-only-off-20261013 \
+    --height 336 --width 448 --simplify --verify
+```
+
+`--simplify` optimizes the graph with onnxsim; `--verify` compares the ONNX
+Runtime output (CUDA execution provider when available) against PyTorch. See
+[`docs/release_onnx.md`](docs/release_onnx.md) for the verification contract and
+measured RTX 2070 numbers.
 
 ## Getting Started
 ### Setup Environment

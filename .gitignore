@@ -159,3 +159,7 @@ skyseg.onnx
 /outputs/
 /runs/
 /private/
+
+# ONNX exports (potentially multi-GB, regenerate with scripts/export_onnx.py)
+/exports/
+*.onnx.data

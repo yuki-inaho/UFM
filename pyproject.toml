@@ -58,12 +58,31 @@ dev = [
 demo = [
     "gradio",
 ]
+# ONNX export + onnxsim graph optimization (no runtime; export works on CPU)
+onnx = [
+    "onnx",
+    "onnxscript",
+    "onnxsim",
+]
+# ONNX Runtime with the CUDA execution provider (GPU inference mode).
+# Use `pip install onnxruntime` instead of `onnxruntime-gpu` for a CPU-only
+# runtime; never install both runtime wheels together.
+onnx-gpu = [
+    "onnx",
+    "onnxscript",
+    "onnxsim",
+    "onnxruntime-gpu",
+]
 all = [
     "black",
     "isort",
     "pre-commit",
     "pytest",
     "gradio",
+    "onnx",
+    "onnxscript",
+    "onnxsim",
+    "onnxruntime-gpu",
 ]
 
 [project.scripts]
@@ -75,6 +94,12 @@ Homepage = "https://uniflowmatch.github.io/"
 Repository = "https://github.com/UniFlowMatch/UFM.git"
 Documentation = "https://uniflowmatch.github.io/"
 "Bug Tracker" = "https://github.com/UniFlowMatch/UFM/issues"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "e2e: end-to-end tests that download model checkpoints and run inference",
+]
 
 [tool.black]
 line-length = 120
