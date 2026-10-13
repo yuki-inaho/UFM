@@ -135,6 +135,16 @@ def _uniception_commit():
     return commit
 
 
+def _modality_is_rgb(resolved) -> bool:
+    """True when the resolved config selects the *true* RGB-only model.
+
+    A strict ``is False`` compare: ``use_depth_fusion`` is validated as a bool,
+    so the RGB-D default (``True``) and any malformed value are never treated as
+    RGB-only here.
+    """
+    return resolved.get("model", {}).get("use_depth_fusion") is False
+
+
 def _source_identity(resolved):
     from uniflowmatch.models.checkpoint import sha256_file
     from uniflowmatch.training import rgbd_checkpoint as C
@@ -201,6 +211,7 @@ def _train(resolved, args) -> int:
         RGBDTrainer,
         build_rgbd_model,
         freeze_encoder,
+        load_released_rgb_weights,
         load_released_rgbd_weights,
         local_dino_hub,
     )
@@ -229,17 +240,32 @@ def _train(resolved, args) -> int:
         # ordering contract: CPU construct -> strict released load -> to(device) ->
         # freeze -> build_optimizer (so AMUSE momentum buffers are created on the
         # model device from the start).
-        fusion = resolved["model"]["depth_fusion_kwargs"]
+        rgb_only = _modality_is_rgb(resolved)
+        fusion = resolved["model"].get("depth_fusion_kwargs")
         with local_dino_hub(
             assets["dino_hub_dir"], "dinov2_vitl14",
             resolved["model"]["dino_python_tree_sha256"], pretrained=False,
         ):
-            model = build_rgbd_model(model_kwargs, fusion_kwargs=fusion, model_class=UniFlowMatchConfidence)
-        report = load_released_rgbd_weights(
-            model, assets["asset_path"],
-            expected_sha256=resolved["model"]["public"]["pretrained_sha256"],
-            expected_bytes=resolved["model"]["public"].get("pretrained_bytes"),
-        )
+            if rgb_only:
+                model = build_rgbd_model(
+                    model_kwargs, model_class=UniFlowMatchConfidence, rgb_only=True
+                )
+            else:
+                model = build_rgbd_model(
+                    model_kwargs, fusion_kwargs=fusion, model_class=UniFlowMatchConfidence
+                )
+        if rgb_only:
+            report = load_released_rgb_weights(
+                model, assets["asset_path"],
+                expected_sha256=resolved["model"]["public"]["pretrained_sha256"],
+                expected_bytes=resolved["model"]["public"].get("pretrained_bytes"),
+            )
+        else:
+            report = load_released_rgbd_weights(
+                model, assets["asset_path"],
+                expected_sha256=resolved["model"]["public"]["pretrained_sha256"],
+                expected_bytes=resolved["model"]["public"].get("pretrained_bytes"),
+            )
         model.to(args.device)
         freeze_encoder(model)
         optimizer = build_optimizer(model, resolved)

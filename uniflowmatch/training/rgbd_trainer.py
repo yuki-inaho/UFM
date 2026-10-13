@@ -76,6 +76,9 @@ __all__ = [
     "freeze_encoder",
     "build_rgbd_model",
     "load_released_rgbd_weights",
+    "load_released_rgb_weights",
+    "RGB_DEPTH_STRIP_KEYS",
+    "strip_depth_input_keys",
     "param_grad_norm",
     "EventsLogger",
     "RGBDTrainer",
@@ -128,6 +131,22 @@ _PACK_TENSOR_KEYS = (
 )
 _PACK_SCALAR_KEYS = ("data_norm_type", "pair_id", "capture", "split", "frame_index", "flow_direction")
 
+#: depth / depth-mask / provenance keys removed from the view sent to a *true
+#: RGB-only* model (``depth_fusion is None``).  These are exactly the depth
+#: inputs the UFM depth-fusion path would consume; the packed supervision
+#: (``flow`` / ``non_occluded_mask`` / ...) is never touched.
+RGB_DEPTH_STRIP_KEYS = (
+    "depth",
+    "dilated_depth_m",
+    "depthmap",
+    "depth_mask",
+    "dilated_depth_window_mask",
+    "valid_mask",
+    "raw_depth_m",
+    "raw_depth_window_mask",
+    "depth_provenance",
+)
+
 
 # --------------------------------------------------------------------------- #
 # precision / freeze guards
@@ -165,6 +184,17 @@ def param_grad_norm(model: nn.Module, prefix: str) -> float:
         if n.startswith(prefix) and p.grad is not None:
             total += float(p.grad.detach().pow(2).sum())
     return math.sqrt(total)
+
+
+def strip_depth_input_keys(view: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return a shallow copy of ``view`` without any depth / mask / provenance key.
+
+    Applied ONLY to the model-forward input of a true RGB-only model
+    (``depth_fusion is None``).  The packed supervision and the augmentation
+    geometry keep their depth keys; this merely guarantees the RGB model never
+    sees a depth input.
+    """
+    return {k: v for k, v in view.items() if k not in RGB_DEPTH_STRIP_KEYS}
 
 
 # --------------------------------------------------------------------------- #
@@ -321,18 +351,27 @@ def local_dino_hub(hub_dir: Any, entry: str, expected_tree_sha: str, *, pretrain
 def build_rgbd_model(
     model_kwargs: Mapping[str, Any],
     *,
-    fusion_kwargs: Mapping[str, Any],
+    fusion_kwargs: Optional[Mapping[str, Any]] = None,
     model_class: Callable[..., nn.Module],
+    rgb_only: bool = False,
 ) -> nn.Module:
-    """Construct the RGB-D model, applying the fusion kwargs correctly.
+    """Construct the model, applying the fusion kwargs correctly.
 
     ``fusion_kwargs`` is a **bare** dict (``feature_dim`` / ``depth_hidden_dim`` /
     ``gate_init`` / ``depth_scale``).  It must be nested under
     ``depth_fusion_kwargs`` together with ``use_depth_fusion=True``; updating
     ``model_kwargs`` with the bare dict would raise an unexpected ``feature_dim``.
+
+    ``rgb_only=True`` builds the *true* RGB-only model: ``use_depth_fusion=False``
+    and NO ``depth_fusion_kwargs`` (the fusion kwargs are deliberately not passed).
+    ``rgb_only`` defaults to ``False`` so the existing RGB-D path is unchanged.
     """
     kwargs = dict(model_kwargs)
-    kwargs.update(use_depth_fusion=True, depth_fusion_kwargs=dict(fusion_kwargs))
+    if rgb_only:
+        kwargs.update(use_depth_fusion=False)
+        kwargs.pop("depth_fusion_kwargs", None)
+    else:
+        kwargs.update(use_depth_fusion=True, depth_fusion_kwargs=dict(fusion_kwargs or {}))
     kwargs.pop("pretrained_checkpoint_path", None)
     kwargs.pop("pretrained_backbone_checkpoint_path", None)
     return model_class(**kwargs)
@@ -357,6 +396,35 @@ def load_released_rgbd_weights(
     )
     state = load_checkpoint(str(asset_path), weights_only=True, map_location="cpu")
     return migrate_rgb_to_rgbd(model, state)
+
+
+def load_released_rgb_weights(
+    model: nn.Module,
+    asset_path: Any,
+    *,
+    expected_sha256: Optional[str] = None,
+    expected_bytes: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Strictly load the released UFM RGB weights into a true RGB-only model.
+
+    Uses the existing alias-aware :func:`load_released_state` (never the
+    RGB->RGB-D migration helper, which *requires* the depth module).  Verifies
+    the asset SHA256 / byte size before any weight bytes are read.
+    """
+    from uniflowmatch.models.checkpoint import (
+        extract_state_dict,
+        load_checkpoint,
+        load_released_state,
+        verify_file_identity,
+    )
+
+    report = verify_file_identity(
+        str(asset_path), expected_sha256=expected_sha256, expected_bytes=expected_bytes
+    )
+    state = load_checkpoint(str(asset_path), weights_only=True, map_location="cpu")
+    out = dict(report)
+    out["state"] = load_released_state(model, extract_state_dict(state), require_fp32=True)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -563,6 +631,12 @@ class RGBDTrainer:
         # restored in `finally`.  It wraps `_autocast` (outside it).
         with deterministic_forward_context(self.cfg):
             with self._autocast():
+                # A true RGB-only model (depth_fusion is None) must never receive
+                # a depth input: strip depth / depth-mask / provenance keys from
+                # the forwarded view.  The RGB-D default is unchanged.
+                if getattr(self.model, "depth_fusion", None) is None:
+                    view1 = strip_depth_input_keys(view1)
+                    view2 = strip_depth_input_keys(view2)
                 return self.model(view1, view2)
 
     # -- loss -------------------------------------------------------------- #

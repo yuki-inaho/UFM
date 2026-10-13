@@ -75,6 +75,7 @@ from uniflowmatch.training.rgbd_trainer import (
     load_released_rgbd_weights,
     local_dino_hub,
     pack_pair_batch,
+    strip_depth_input_keys,
 )
 
 #: the four variants this runner evaluates, in canonical order.
@@ -84,6 +85,21 @@ VARIANTS: Tuple[str, ...] = (
     "rgbd_off",
     "rgbd_on",
 )
+
+#: optional, additive variants for the RGB-only comparison.  They are NOT part
+#: of the canonical tuple (whose semantics are unchanged); a descriptor may
+#: define them and a caller may explicitly request them.
+OPTIONAL_VARIANTS: Tuple[str, ...] = (
+    "rgb_off",
+    "rgb_on",
+)
+
+#: every variant name the runner accepts (canonical + optional).
+ALL_VARIANTS: Tuple[str, ...] = VARIANTS + OPTIONAL_VARIANTS
+
+#: variant kinds the descriptor may declare.  ``checkpoint`` keeps its RGB-D
+#: meaning; ``rgb_checkpoint`` is the additive RGB-trained (depth-free) kind.
+ALLOWED_KINDS: Tuple[str, ...] = ("rgb", "rgbd_init", "checkpoint", "rgb_checkpoint")
 
 #: splits the CLI accepts; a test-only role forbids checkpoint selection.
 ALLOWED_SPLITS: Tuple[str, ...] = ("val", "test")
@@ -179,16 +195,20 @@ def validate_descriptor(desc: Mapping[str, Any]) -> None:
             raise EvaluationRunError(f"descriptor.assets.{key} is required")
 
     variants = desc["variants"]
-    for name in VARIANTS:
+    for name in ALL_VARIANTS:
         if name not in variants:
-            raise EvaluationRunError(f"descriptor.variants must define {name!r}")
+            if name in VARIANTS:
+                raise EvaluationRunError(f"descriptor.variants must define {name!r}")
+            continue
         v = variants[name]
+        if not isinstance(v, Mapping):
+            raise EvaluationRunError(f"descriptor.variants.{name} must be an object")
         kind = str(v.get("kind", ""))
-        if kind not in ("rgb", "rgbd_init", "checkpoint"):
+        if kind not in ALLOWED_KINDS:
             raise EvaluationRunError(
-                f"variant {name!r} kind must be rgb / rgbd_init / checkpoint, got {kind!r}"
+                f"variant {name!r} kind must be one of {list(ALLOWED_KINDS)}, got {kind!r}"
             )
-        if kind == "checkpoint" and not v.get("checkpoint_path"):
+        if kind in ("checkpoint", "rgb_checkpoint") and not v.get("checkpoint_path"):
             raise EvaluationRunError(f"variant {name!r} requires checkpoint_path")
 
 
@@ -381,11 +401,12 @@ def _build_rgbd(name: str, desc: Mapping[str, Any], device: torch.device):
     fusion = dict(model_spec.get("depth_fusion_kwargs") or {})
     kind = str(desc["variants"][name]["kind"])
     entry = str(assets.get("dino_entry", "dinov2_vitl14"))
+    is_rgb = kind in ("rgb", "rgb_checkpoint")
 
     with local_dino_hub(
         assets["dino_hub_dir"], entry, str(assets["dino_python_tree_sha256"]), pretrained=False
     ):
-        if kind == "rgb":
+        if is_rgb:
             model = _resolve_class(str(model_spec.get("rgb_class", "uniflowmatch.models.ufm:UniFlowMatchConfidence")))(
                 **_strip_fusion_kwargs(model_kwargs)
             )
@@ -404,6 +425,12 @@ def _build_rgbd(name: str, desc: Mapping[str, Any], device: torch.device):
             str(assets["asset_path"]), weights_only=True, map_location="cpu"
         )
         load_released_state(model, extract_state_dict(released), require_fp32=True)
+    elif kind == "rgb_checkpoint":
+        # an RGB-trained checkpoint is depth-free: it is loaded *only* from the
+        # trained best-averaged-x state below (never the RGB-D migration helper).
+        # The released asset identity is still verified (the fixed-comparison
+        # guard is kept for every variant).
+        _verify_asset_identity(assets)
     else:
         # load_released_rgbd_weights verifies SHA256 / byte size before loading.
         load_released_rgbd_weights(
@@ -413,7 +440,7 @@ def _build_rgbd(name: str, desc: Mapping[str, Any], device: torch.device):
             expected_bytes=assets.get("asset_bytes"),
         )
 
-    if kind == "checkpoint":
+    if kind in ("checkpoint", "rgb_checkpoint"):
         v = desc["variants"][name]
         state = _load_checkpoint_state(v["checkpoint_path"], expected_sha256=v.get("checkpoint_sha256"))
         strict_load_state_dict(model, state, require_fp32=True, check_finite=True)
@@ -512,6 +539,11 @@ def evaluate_variant(
         view1 = _to_device(view1, device)
         view2 = _to_device(view2, device)
         sup = _to_device(sup, device)
+
+        # a true RGB-only model (depth_fusion is None) must never see depth.
+        if getattr(model, "depth_fusion", None) is None:
+            view1 = strip_depth_input_keys(view1)
+            view2 = strip_depth_input_keys(view2)
 
         with torch.inference_mode(), deterministic_forward_context(det_cfg):
             result = model(view1, view2)
@@ -666,9 +698,9 @@ def run(
     duplicates = sorted({v for v in requested if requested.count(v) > 1})
     if duplicates:
         raise EvaluationRunError(f"duplicate variants requested: {duplicates}")
-    unknown = [v for v in requested if v not in VARIANTS]
+    unknown = [v for v in requested if v not in ALL_VARIANTS]
     if unknown:
-        raise EvaluationRunError(f"unknown variants {unknown}; allowed {list(VARIANTS)}")
+        raise EvaluationRunError(f"unknown variants {unknown}; allowed {list(ALL_VARIANTS)}")
 
     # the output directory must be Git-external (symlinks followed) BEFORE any
     # directory is created or any byte is written.
@@ -813,6 +845,7 @@ def _model_identity(model: torch.nn.Module, name: str, desc: Mapping[str, Any]) 
     return {
         "variant": name,
         "kind": str(desc["variants"][name]["kind"]),
+        "modality": "rgb" if df is None else "rgbd",
         "state_sha256": h.hexdigest(),
         "gate": gate,
     }
